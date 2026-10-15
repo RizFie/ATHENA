@@ -25,7 +25,11 @@ def ask_athena(conversation):
     )
 
     with urllib.request.urlopen(request, timeout=120) as response:
-        result = json.loads(response.read().decode("utf-8"))
+        try:
+            result = json.loads(response.read().decode("utf-8"))
+
+        except json.JSONDecodeError as e:
+            raise ValueError("Ollama returned invalid JSON.") from e
 
     try:
         answer = result["message"]["content"]
@@ -53,19 +57,23 @@ if __name__ == "__main__":
             answer = ask_athena(conversations)
 
         except urllib.error.HTTPError as e:
+            conversations.pop()
             print(f"Athena: Ollama returned an HTTP error: {e.code}")
 
         except urllib.error.URLError as e:
+            conversations.pop()
             print(f"Athena: Could not connect to Ollama: {e.reason}")
 
         except TimeoutError:
+            conversations.pop()
             print("Athena: The request timed out. Please try again.")
 
         except ValueError as e:
+            conversations.pop()
             print(f"Athena: Invalid response from Ollama: {e}")
 
         else:
             # Also append model's answer to memory for context
             conversations.append({"role": "assistant", "content": answer})
 
-            print("Athena:",answer)
+            print("\nAthena:",answer)
