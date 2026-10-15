@@ -1,6 +1,7 @@
 import json
 import urllib.request
 import urllib.error
+from ddgs import DDGS
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen3:8b-q4_K_M"
@@ -31,6 +32,37 @@ def load_memory():
 def save_memory(conversations):
     with open(MEMORY_FILE, "w", encoding="utf-8") as file:
         json.dump(conversations, file, indent=4, ensure_ascii=False)
+
+def research_web(queries, max_results=10, results_per_query=5):
+
+    found = {}
+
+    with DDGS(timeout=10) as ddgs:
+        for query in queries:
+            try: 
+                results = ddgs.text(
+                    query,
+                    region="my-en",
+                    safe_search="moderate",
+                    max_results=max_results
+                )
+
+                for result in results:
+                    url = result.get("href","")
+                    title = result.get("title","")
+
+                    if not url.startswith("https://"):
+                        continue
+
+                    if not title:
+                        continue
+
+                    found[url] = result
+
+            except Exception as e:
+                print(f"Search failed for {query}: {e}")
+
+    return list(found.values())[:max_results]
 
 def ask_athena(conversation):
     payload = {
@@ -71,8 +103,24 @@ if __name__ == "__main__":
     print("Loading Athena memory...")
     conversations = load_memory()
     print("Memory loaded successfully.")
+
+    queries = [
+    '"AI intern" Klang Valley Malaysia March 2027',
+    '"machine learning intern" Malaysia',
+    '"data analyst intern" Kuala Lumpur Selangor',
+    'site:linkedin.com/jobs/view "Data Analyst Intern" Malaysia',
+    'site:my.jobstreet.com "Machine Learning Intern"',
+    ]
+
+    results = research_web(queries, max_results=10)
+
+    for i, result in enumerate(results, start=1):
+        print(f"\n{i}. {result['title']}")
+        print("URL:", result['href'])
+        print("Summary:", result.get('body', ''))
+
     while True:
-        query = input("> ")
+        query = input("\n> ")
         
         if query.strip().lower() == "/bye":
             print("Goodbye!")
