@@ -33,6 +33,7 @@ def save_memory(conversations):
     with open(MEMORY_FILE, "w", encoding="utf-8") as file:
         json.dump(conversations, file, indent=4, ensure_ascii=False)
 
+# Search web tool for Athena (Return result of searches, not webpages)
 def research_web(queries, max_results=10, results_per_query=5):
 
     found = {}
@@ -63,6 +64,35 @@ def research_web(queries, max_results=10, results_per_query=5):
                 print(f"Search failed for {query}: {e}")
 
     return list(found.values())[:max_results]
+
+# Read page tool for Athena
+def read_webpage(url):
+    try:
+        with DDGS(timeout=15) as ddgs:
+            page = ddgs.extract(url)
+
+        if not isinstance(page, dict):
+            return {
+                "url":url,
+                "title":"",
+                "content":"",
+                "error":"Unexpected response format."
+            }
+
+        return {
+            "url":page.get("url",url),
+            "title":page.get("title", ""),
+            "content":page.get("content",""),
+            "error":None
+        }
+
+    except Exception as e:
+        return {
+            "url": url,
+            "title": "",
+            "content": "",
+            "error": str(e),
+        }
 
 def ask_athena(conversation):
     payload = {
@@ -114,10 +144,18 @@ if __name__ == "__main__":
 
     results = research_web(queries, max_results=10)
 
-    for i, result in enumerate(results, start=1):
-        print(f"\n{i}. {result['title']}")
-        print("URL:", result['href'])
-        print("Summary:", result.get('body', ''))
+    if results:
+        page = read_webpage(results[0]["href"])
+
+        print("\n--- WEBPAGE TEST ---")
+        print("URL:", page["url"])
+        print("Title:", page["title"])
+
+        if page["error"]:
+            print("Error:", page["error"])
+        else:
+            print("Content:")
+            print(page["content"][:3000])
 
     while True:
         query = input("\n> ")
