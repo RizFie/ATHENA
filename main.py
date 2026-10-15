@@ -4,8 +4,33 @@ import urllib.error
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen3:8b-q4_K_M"
+MEMORY_FILE = "memory.json"
 
-conversations = [{"role": "system", "content": "You are Athena, a helpful research assistant. Answer the user's questions clearly and accurately."},]
+def load_memory():
+    try:
+        with open(MEMORY_FILE, "r", encoding="utf-8") as file:
+            conversations = json.load(file)
+
+        if not isinstance(conversations, list):
+            raise ValueError("Memory must be a list.")
+
+        if not conversations or conversations[0].get("role") != "system":
+            raise ValueError("Memory is missing the system message")
+
+        return conversations
+
+    except FileNotFoundError:
+        return [
+                {
+                "role": "system",
+                "content": ("You are Athena, a helpful research assistant. "
+                "Answer the user's questions clearly and accurately.")
+                },
+            ]
+
+def save_memory(conversations):
+    with open(MEMORY_FILE, "w", encoding="utf-8") as file:
+        json.dump(conversations, file, indent=4, ensure_ascii=False)
 
 def ask_athena(conversation):
     payload = {
@@ -43,6 +68,9 @@ def ask_athena(conversation):
     return answer
 
 if __name__ == "__main__":
+    print("Loading Athena memory...")
+    conversations = load_memory()
+    print("Memory loaded successfully.")
     while True:
         query = input("> ")
         
@@ -76,4 +104,12 @@ if __name__ == "__main__":
             # Also append model's answer to memory for context
             conversations.append({"role": "assistant", "content": answer})
 
-            print("\nAthena:",answer)
+            try:
+                # Saving to memory
+                save_memory(conversations)
+                print("\nAthena:",answer)
+
+            except OSError as e:
+                print(f"I couldn't save our conversations to the memory: {e}")
+                print("\nAthena:",answer)
+            
