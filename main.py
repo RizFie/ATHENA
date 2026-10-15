@@ -1,5 +1,6 @@
 import json
 import urllib.request
+import urllib.error
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen3:8b-q4_K_M"
@@ -26,7 +27,16 @@ def ask_athena(conversation):
     with urllib.request.urlopen(request, timeout=120) as response:
         result = json.loads(response.read().decode("utf-8"))
 
-    return result["message"]["content"]
+    try:
+        answer = result["message"]["content"]
+
+    except (KeyError, TypeError):
+        raise ValueError("Ollama returned an unexpected response format.")
+    
+    if not isinstance(answer, str):
+        raise ValueError("Ollama returned a non-text response.")
+
+    return answer
 
 if __name__ == "__main__":
     while True:
@@ -39,9 +49,23 @@ if __name__ == "__main__":
         # Append user's query to memory for context
         conversations.append({"role": "user", "content": query})
 
-        answer = ask_athena(conversations)
+        try:
+            answer = ask_athena(conversations)
 
-        # Also append model's answer to memory for context
-        conversations.append({"role": "assistant", "content": answer})
+        except urllib.error.HTTPError as e:
+            print(f"Athena: Ollama returned an HTTP error: {e.code}")
 
-        print("Athena:",answer)
+        except urllib.error.URLError as e:
+            print(f"Athena: Could not connect to Ollama: {e.reason}")
+
+        except TimeoutError:
+            print("Athena: The request timed out. Please try again.")
+
+        except ValueError as e:
+            print(f"Athena: Invalid response from Ollama: {e}")
+
+        else:
+            # Also append model's answer to memory for context
+            conversations.append({"role": "assistant", "content": answer})
+
+            print("Athena:",answer)
