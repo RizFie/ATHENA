@@ -108,87 +108,6 @@ def read_webpage(url):
             "error": str(e),
         }
 
-# --- The Markdown parsing functions (Currently only for JobStreet web format) ---
-def split_markdown_listings(content):
-    headings = list(
-        re.finditer(r"(?m)^#{2,4}\s+.+$", content)
-    )
-
-    records = []
-
-    for i, heading in enumerate(headings):
-        if not heading.group().startswith("### ["):
-            continue
-
-        start = heading.start()
-
-        next_heading = next(
-            (
-                h.start()
-                for h in headings[i + 1:]
-                if h.group().startswith("### [")
-            ),
-            len(content)
-        )
-
-        record_text = content[start:next_heading].strip()
-
-        if record_text:
-            records.append(record_text)
-
-    return records
-
-def extract_markdown_link_references(content, base_url):
-    references = {}
-
-    pattern = r"(?m)^\[([^\]]+)\]:\s*<?([^\s>]+)>?"
-
-    for match in re.finditer(pattern, content):
-        reference_id = match.group(1)
-        destination = match.group(2)
-
-        references[reference_id] = urljoin(base_url, destination)
-
-    return references
-
-def parse_job_record(record_text, link_references):
-    lines = record_text.splitlines()
-
-    job = {
-        "title": None,
-        "company": None,
-        "location": None,
-        "salary": None,
-        "job_url": None,
-        "raw_text": record_text,
-    }
-
-    for line in lines:
-        line = line.strip()
-
-        # Extract the title and its Markdown reference ID
-        if line.startswith("### [") and job["title"] is None:
-            match = re.match(r"^### \[(.*?)\]\[([^\]]+)\]", line)
-
-            if match:
-                job["title"] = match.group(1)
-                reference_id = match.group(2)
-                job["job_url"] = link_references.get(reference_id)
-
-        # Extract the company
-        elif line.startswith("at [") and job["company"] is None:
-            job["company"] = line[4:].split("]", 1)[0]
-
-        # Extract the location
-        elif line.startswith("[") and "][" in line and job["location"] is None:
-            job["location"] = line[1:].split("]", 1)[0]
-
-        # Extract the salary
-        elif "RM" in line.replace("\xa0", " ") and job["salary"] is None:
-            job["salary"] = line.replace("\xa0", " ")
-
-    return job
-# ---------------------------------------------------------------------------------
 
 
 #  Extract structured data when Athena already browse a page
@@ -219,14 +138,17 @@ def extract_structured_data(page, fields):
     return jobs
 
 # Main function call to chat with Athena
-def ask_athena(conversation):
+def ask_athena(conversation, json_mode=False):
     start = time.time()
     payload = {
         "model": MODEL,
         "messages": conversation,
         "think": False,
-        "stream": False
+        "stream": False,
     }
+
+    if json_mode:
+        payload["format"] = "json"
 
     data = json.dumps(payload).encode("utf-8")
 
@@ -271,50 +193,6 @@ if __name__ == "__main__":
     print("Loading Athena memory...")
     conversations = load_memory()
     print("Memory loaded successfully.")
-
-    # 2. Define search query (Hardcoded for now)
-    queries = [
-    "AI internship Malaysia",
-    "machine learning internship KL",
-    "data analyst internship Kuala Lumpur",
-    ]  
-
-    # 3. Calls research_web to get search results
-    results = research_web(queries, max_results=10)
-
-    # 4. Check if the results exist
-    if results:
-
-        # 5. Get the URL of each results
-        for result in results:
-            url = result["href"]
-
-            # 6. Calls read_webpage and pass the URL
-            page = read_webpage(url)
-
-            # ERROR HANDLING
-            if page["error"]:
-                print(f"Couldn't read page: {page['error']}")
-                continue
-
-            # CONTINUE WITH NO ERROR
-            else:
-                # Hardcoded fields for now
-                fields = [
-                        "job_titles",
-                        "companies",
-                        "locations",
-                        "salaries",
-                        "job_descriptions",
-                        "application_links",
-                        ]
-
-                print("Extracting page data...")
-
-                # 7. Calls extract_structured_data
-                data = extract_structured_data(page, fields)
-                print(f"Data: {data}")
-                break
 
     while True:
         query = input("\n> ")
