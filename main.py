@@ -32,6 +32,8 @@ def init_db():
             title TEXT NOT NULL,
             provider TEXT,
             data_json TEXT,
+            source_url TEXT,
+            link TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(entity_type, title, provider)
         )
@@ -63,12 +65,18 @@ def save_research_to_db(entity_name, research_records):
                 or "Unknown Provider"
             )
             data_str = json.dumps(item, ensure_ascii=False)
+            link = (
+                item.get("link")
+                or item.get("buy_link")
+                or item.get("apply_link")
+                or "Couldn't retrieve specific link."
+            )
 
             try:
                 cursor.execute("""
-                    INSERT INTO research_items (entity_type, title, provider, data_json, source_url)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (entity_name.lower(), str(title), str(provider), data_str, source_url))
+                    INSERT INTO research_items (entity_type, title, provider, data_json, source_url, link)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (entity_name.lower(), str(title), str(provider), data_str, source_url, link))
                 saved_count += 1
             except sqlite3.IntegrityError:
                 # Deduplication triggered
@@ -78,12 +86,12 @@ def save_research_to_db(entity_name, research_records):
     conn.close()
     return saved_count
 
-def query_datbase(entity_type=None, search_term=None, limit=10):
+def query_database(entity_type=None, search_term=None, limit=10):
     # Retrieves saved items from SQLite database.
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    query = "SELECT entity_type, title, provider, data_json, source_url FROM research_items WHERE 1=1"
+    query = "SELECT entity_type, title, provider, data_json, source_url, link FROM research_items WHERE 1=1"
     params = []
 
     if entity_type:
@@ -109,7 +117,8 @@ def query_datbase(entity_type=None, search_term=None, limit=10):
             "title": row[1],
             "provider": row[2],
             "details": json.loads(row[3]),
-            "sorce_url": row[4]
+            "source_url": row[4],
+            "link": row[5]
         })
     return results
 #---------------------------
@@ -142,7 +151,7 @@ def save_memory(conversations):
         json.dump(conversations, file, indent=4, ensure_ascii=False)
 # ------------------------
 
-# --- WEB SEARCH FUNCTIONS ----------------------------------------------
+# --- WEB SEARCH & EXTRACTION ENGINE FUNCTIONS ----------------------------------------------
 # Search web tool for Athena (Return result of searches, not webpages)
 def research_web(queries, max_results=10, results_per_query=10):
 
@@ -236,7 +245,7 @@ def read_webpage(url):
         raw_content = page.get("content","")
         page_url = page.get("url",url)
         clean_content = inline_markdown_references(raw_content, base_url=page_url)
-        print(f"Cleaned Content Length: {len(clean_content)}")
+        # print(f"Cleaned Content Length: {len(clean_content)}")
 
         return {
             "url":page_url,
@@ -374,13 +383,13 @@ def extract_structured_data(page, fields, focus_keywords=None):
 
     raw_content = page.get("content","")
     print("Reading URL:",page.get("url",""))
-    print(f"Raw page length: {len(raw_content)} chars")
+    # print(f"Raw page length: {len(raw_content)} chars")
 
     # Shrink the raw webpages for llm
     trimmed_content = trim_webpage_for_llm(raw_content, focus_keywords=focus_keywords, max_chars=5000)
-    print(f"Trimmed length sent to LLM: {len(trimmed_content)} chars")
-    print(f"\n--- Trimmed Content ---")
-    print(trimmed_content)
+    #print(f"Trimmed length sent to LLM: {len(trimmed_content)} chars")
+    #print(f"\n--- Trimmed Content ---")
+    #print(trimmed_content)
 
     # Structure the prompt for the llm
     prompt = f"""
@@ -405,7 +414,7 @@ def extract_structured_data(page, fields, focus_keywords=None):
         """
 
     # Calls out Athena
-    print("\nPassing data to Athena...")
+    print(f"\n{YELLOW}Handing off text data to Athena. This may take a while.{RESET}")
     response = ask_athena(
             [
                 {
@@ -521,54 +530,150 @@ def plan_research(user_prompt):
             raise ValueError(f"{RED}Planner failed to return valid JSON.{RESET}") from e
 # -------------------------------------------------------------------------
 
-if __name__ == "__main__":
+# ------ ATHENA TOOL EXECUTION WRAPPERS ------
+def execute_research_tool(user_request):
+    plan = plan_research(user_request)
+    dynamic_schema = {plan["entity_name"]: [plan["custom_fields"]]}
 
-    # 1. Load the Memory
+    print(f"{YELLOW}[Tool] Executing research for entity: '{plan['entity_name']}'{RESET}")
+    records = research_pipeline(
+        queries=plan["queries"],
+        fields=dynamic_schema,
+        max_results=10,
+        pages_to_read=2
+    )
+
+    if not records:
+        return "No research records could be extracted."
+
+    saved_count = save_research_to_db(plan["entity_name"], records)
+    return f"Research complete. Saved {saved_count} new unique '{plan['entity_name']}' items to SQLite database."
+
+# --- AGENTIC TOOL CALL --- used in agent loop
+def decide_tool_call(user_input, conversation_history):
+    system_instruction = """
+        You are the tool routing engine for Athena, an autonomous research agent.
+        Analyze the user's message and select the single best tool to execute.
+
+        Available Tools:
+        1. "query_database": Use when the user asks about previously saved/researched items, summaries of stored data, or comparisons of existing database records.
+        Arguments: {"entity_type": "string or null", "search_term": "string or null"}
+
+        2. "web_research": Use when the user requests new, fresh, or unstored information from the internet (e.g. searching for products, job listings, price checks).
+        Arguments: {"research_query": "string (the natural language request)"}
+
+        3. "none": Use for general chat, follow-up explanations, greetings, or questions that do not require external data or database lookups.
+        Arguments: {}
+
+        Return ONLY a valid JSON object matching this schema:
+        {
+            "thought": "Brief 1-sentence reasoning for tool selection",
+            "tool": "query_database" | "web_research" | "none",
+            "args": {}
+        }
+    """
+
+    chat_only = [msg for msg in conversation_history if msg["role"] != "system"]
+
+    history_text = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in chat_only[-4:]])
+
+    prompt = f"Recent conversation:\n{history_text}\n\nSelect tool for: '{user_input}'"
+
+    # Build evaluation context with the last few messages
+    eval_message = [
+        {"role":"system", "content":system_instruction},
+        {"role": "user", "content": f"Select tool for: '{prompt}'"}
+    ]
+
+    response = ask_athena(eval_message, json_mode=True)
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        return {"thought": "Fallback due to JSON decode error.", "tool": "none", "args": {}}
+
+# --- AUTONOMOUS AGENT LOOP ---
+def agent_loop(user_input, conversation_history):
+    """
+    Autonomous execution loop:
+    1. Determines required tool.
+    2. Executes tool (if needed) and pulls data.
+    3. Synthesizes tool results into a conversational answer.
+    """
+
+    decision = decide_tool_call(user_input, conversation_history)
+    tool = decision.get("tool","")
+    args = decision.get("args",{})
+    thought = decision.get("thought","")
+
+    print(f"\n{YELLOW}[Athena Thought]: {thought}{RESET}")
+    print(f"{BLUE}[Tool Triggered]: {tool} | Args: {args}{RESET}")
+
+    tool_context = ""
+
+    if tool == "web_research":
+        research_req = args.get("research_query", user_input)
+        tool_summary = execute_research_tool(research_req)
+
+        recent_items = query_database(limit=5)
+        tool_context = (
+            f"SYSTEM TOOL RESULT ({tool_summary}):\n"
+            f"Here are the newly scraped items saved to the database:\n"
+            f"{json.dumps(recent_items, indent=2, ensure_ascii=False)}"
+        )
+
+    elif tool == "query_database":
+        entity = args.get("entity_type")
+        term = args.get("search_term")
+        db_items = query_database(entity_type=entity, search_term=term, limit=10)
+        tool_context = (
+            f"SYSTEM TOOL RESULT (Database Query):\n"
+            f"Found {len(db_items)} items in SQLite database:\n"
+            f"{json.dumps(db_items, indent=2, ensure_ascii=False)}"
+        )
+
+    messages_for_answer = list(conversation_history)
+
+    final_user_prompt = user_input
+    if tool_context:
+        final_user_prompt = (
+            f"{user_input}\n\n"
+            f"[SYSTEM BACKGROUND DATA]\n{tool_context}\n"
+            f"Use this retrieved data to directly answer the user's request concisely."
+        )
+
+    messages_for_answer.append({"role": "user", "content": final_user_prompt})
+
+    answer = ask_athena(messages_for_answer)
+
+    conversation_history.append({"role": "user", "content": user_input})
+    conversation_history.append({"role": "assistant", "content": answer})
+    save_memory(conversation_history)
+
+    return answer
+
+if __name__ == "__main__":
+    init_db()
     print(f"{YELLOW}Loading Athena memory...{RESET}")
     conversations = load_memory()
-    print(f"{GREEN}Memory loaded successfully.{RESET}")
+    print(f"{GREEN}Autonomous Agent initialized successfully.{RESET}")
 
-    # 2. Ask the user what they want to research
-    print("\nWhat would you like Athena to research for you?")
-    user_request = input("> ")
+    print("\nAthena is ready. Talk to her naturally:")
+    print(" - 'Find me Data Analyst internships in KL'")
+    print(" - 'Which GPUs did we find earlier under RM 3000?'")
+    print(" - Type '/bye' to exit.")
 
-    # 3. Athena dynamically plan it
-    plan = plan_research(user_request)
-
-    print("=== ATHENA RESEARCH PLAN ===")
-    print(json.dumps(plan, indent=2))
-
-    dynamic_schema = {
-        plan["entity_name"]: [ plan["custom_fields"] ]
-    }
-
-    research_data = research_pipeline(
-        queries=plan["queries"], 
-        fields=dynamic_schema, 
-        max_results=10, 
-        pages_to_read=2  # Reads 2 pages so you don't wait forever while testing
-    )
-    print("\n=== FINAL AGGREGATED RESEARCH DATA ===")
-    print(json.dumps(research_data, indent=2, ensure_ascii=False))
-
-    print("\nAthena is ready for chat. Type /bye to exit.")
     while True:
-        query = input("\n> ")
-        
-        if query.strip().lower() == "/bye":
+        user_input = input("\n> ").strip()
+
+        if not user_input:
+            continue
+
+        if user_input.lower() == "/bye":
             print("Goodbye!")
             break
 
-        # Append user's query to memory for context
-        conversations.append({"role": "user", "content": query})
-
         try:
-            answer = ask_athena(conversations)
-        except Exception as e:
-            conversations.pop()
-            print(f"{RED}Athena error: {e}{RESET}")
-        else:
-            conversations.append({"role": "assistant", "content": answer})
-            save_memory(conversations)
+            answer = agent_loop(user_input, conversations)
             print(f"\n{GREEN}Athena{RESET}: {answer}")
-            
+        except Exception as e:
+            print(f"{RED}Agent error: {e}{RESET}")  

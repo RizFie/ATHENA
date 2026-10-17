@@ -182,3 +182,9 @@ cython_debug/
 
 # Athena's memory
 memory.json
+
+# Athena's database
+athena_research.db
+athena_research.db-journal
+athena_research.db-wal
+athena_research.db-shm
