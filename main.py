@@ -4,10 +4,13 @@ from urllib.parse import urljoin
 from ddgs import DDGS
 import time
 import re
+import os
+import sqlite3
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 MEMORY_FILE = "memory.json"
+DB_FILE = "athena_research.db"
 
 # Text color codes
 RED = "\033[31m"
@@ -16,6 +19,65 @@ YELLOW = "\033[33m"
 BLUE = "\033[34m"
 RESET = "\033[0m"
 
+# --- DATABASE FUNCTIONS ---
+def init_db():
+    # Initializes SQLite database with deduplication constraints.
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS research_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            provider TEXT,
+            data_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(entity_type, title, provider)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_research_to_db(entity_name, research_records):
+    # Saves extracted research records to SQLite, skipping duplicates.
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    saved_count = 0
+
+    for record in research_records:
+        items = record.get(entity_name, [])
+        source_url = record.get("source_url","")
+
+        for item in items:
+            title = (   
+                item.get("item_name_or_title") 
+                or item.get("job_title") 
+                or item.get("title")
+                or "Unknown Item"
+            )
+            provider = (
+                item.get("provider_or_company")
+                or item.get("company") 
+                or item.get("seller") 
+                or "Unknown Provider"
+            )
+            data_str = json.dumps(item, ensure_ascii=False)
+
+            try:
+                cursor.execute("""
+                    INSERT INTO research_items (entity_type, title, provider, data_json, source_url)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (entity_name.lower(), str(title), str(provider), data_str, source_url))
+                saved_count += 1
+            except sqlite3.IntegrityError:
+                # Deduplication triggered
+                continue
+
+    conn.commit()
+    conn.close()
+    return saved_count
+
+            
 # --- MEMORY FUNCTIONS ---
 def load_memory():
     try:
@@ -266,7 +328,7 @@ def ask_athena(conversation, json_mode=False):
 
     return answer
 
-#  Extract structured data when Athena already browse a page
+# Extract structured data when Athena already browse a page
 def extract_structured_data(page, fields, focus_keywords=None):
     if page["error"]:
         return {
@@ -335,6 +397,7 @@ def extract_structured_data(page, fields, focus_keywords=None):
     data["source_url"] = page["url"]
     return data
     
+# Full Pipeline for research work
 def research_pipeline(queries, fields, max_results=10, pages_to_read=5):
     """
     Orchestrates the end-to-end Athena research process:
@@ -386,6 +449,7 @@ def research_pipeline(queries, fields, max_results=10, pages_to_read=5):
         return extracted_records
 
 # Function for the llm to return a dynamic schema which include fields to be passed to pipeline
+# Return of research pipeline are based on the dynamic schemas
 def plan_research(user_prompt):
     print(f"\n{YELLOW}[Planner] Analyzing request: '{user_prompt}'{RESET}")
 
