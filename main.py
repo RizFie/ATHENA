@@ -4,7 +4,7 @@ from urllib.parse import urljoin
 from ddgs import DDGS
 import time
 import re
-import os
+import csv
 import sqlite3
 
 # Config
@@ -18,9 +18,6 @@ RED = "\033[31m"
 GREEN = "\033[32m"
 YELLOW = "\033[33m"
 BLUE = "\033[34m"
-RESET = "\033[0m"
-
-
 RESET = "\033[0m"
 
 ART = r"""
@@ -155,6 +152,45 @@ def query_database(entity_type=None, search_term=None, limit=10):
             "link": row[5]
         })
     return results
+
+def export_db_to_csv(entity_type=None):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    query = "SELECT * FROM research_items WHERE 1=1"
+    params = []
+
+    if entity_type:
+        query += " AND entity_type LIKE ?"
+        wildcard_entity = f"%{entity_type}%"
+        params.append(wildcard_entity.lower())
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    db_records = []
+    for row in rows:
+        db_records.append({
+            "entity_type": row[1],
+            "title": row[2],
+            "provider": row[3],
+            "details": json.loads(row[4]),
+            "source_url": row[5],
+            "link": row[6]
+        })
+    #print(db_records)
+    try: 
+        with open(f"{db_records[0].get("entity_type")}.csv", mode="w", newline="", encoding="utf-8") as file:
+            field_names = ["entity_type", "title", "provider", "details", "source_url", "link"]
+            dict_writer = csv.DictWriter(file, fieldnames=field_names)
+            dict_writer.writeheader()
+            dict_writer.writerows(db_records)
+    except Exception as e:
+        print(f"{RED}Error writing database table to CSV{RESET}: {e}")
+
+    print(f"{GREEN}Database table saved to CSV successfully.{RESET}")
+    return len(db_records)
+    
 #---------------------------
 
 # --- MEMORY FUNCTIONS ---
@@ -574,7 +610,7 @@ def execute_research_tool(user_request):
         queries=plan["queries"],
         fields=dynamic_schema,
         max_results=10,
-        pages_to_read=2
+        pages_to_read=5
     )
 
     if not records:
@@ -596,13 +632,16 @@ def decide_tool_call(user_input, conversation_history):
         2. "web_research": Use when the user requests new, fresh, or unstored information from the internet (e.g. searching for products, job listings, price checks).
         Arguments: {"research_query": "string (the natural language request)"}
 
-        3. "none": Use for general chat, follow-up explanations, greetings, or questions that do not require external data or database lookups.
+        3. "save_database_to_csv": Use when the user requests to save all previous research (which were saved to the database) to csv or use when the user directly ask to export the database to csv.
+        Arguments: {"entity_type": "string or null"}
+
+        4. "none": Use for general chat, follow-up explanations, greetings, or questions that do not require external data or database lookups.
         Arguments: {}
 
         Return ONLY a valid JSON object matching this schema:
         {
             "thought": "Brief 1-sentence reasoning for tool selection",
-            "tool": "query_database" | "web_research" | "none",
+            "tool": "query_database" | "web_research" | "save_database_to_csv" | "none",
             "args": {}
         }
     """
@@ -665,6 +704,15 @@ def agent_loop(user_input, conversation_history):
             f"{json.dumps(db_items, indent=2, ensure_ascii=False)}"
         )
 
+    elif tool == "save_database_to_csv":
+        entity = args.get("entity_type")
+        records_count = export_db_to_csv(entity)
+        tool_context = (
+            f"SYSTEM TOOL RESULT (Export CSV):\n"
+            f"Successfully exported {records_count} '{entity}' records to {entity}.csv.\n"
+        )
+
+
     messages_for_answer = list(conversation_history)
 
     final_user_prompt = user_input
@@ -697,13 +745,15 @@ if __name__ == "__main__":
         start_color=(210, 102, 255),
         end_color=(147, 144, 255)
     )
-    print("\nAthena is ready. Talk to her naturally:")
+    print("\n--------------------------------------------------")
+    print("Athena is ready. Talk to her naturally:")
     print(" • 'Find me Data Analyst internships in KL'")
     print(" • 'Which GPUs did we find earlier under RM 3000?'")
     print(" • Type '/bye' to exit.")
+    print("--------------------------------------------------")
 
     while True:
-        user_input = input("\n> ").strip()
+        user_input = input(f"\n{GREEN}[INPUT]{RESET} > ").strip()
 
         if not user_input:
             continue
