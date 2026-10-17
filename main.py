@@ -20,6 +20,40 @@ YELLOW = "\033[33m"
 BLUE = "\033[34m"
 RESET = "\033[0m"
 
+
+RESET = "\033[0m"
+
+ART = r"""
+ █████╗ ████████╗██╗  ██╗███████╗███╗   ██╗ █████╗
+██╔══██╗╚══██╔══╝██║  ██║██╔════╝████╗  ██║██╔══██╗
+███████║   ██║   ███████║█████╗  ██╔██╗ ██║███████║
+██╔══██║   ██║   ██╔══██║██╔══╝  ██║╚██╗██║██╔══██║
+██║  ██║   ██║   ██║  ██║███████╗██║ ╚████║██║  ██║
+╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝
+"""
+
+
+def vertical_gradient(text, start_color, end_color):
+    lines = text.splitlines()
+    total = len(lines) - 1
+
+    for i, line in enumerate(lines):
+        if not line:
+            print()
+            continue
+
+        # Calculate the interpolation ratio
+        ratio = i / total if total else 0
+
+        # Interpolate between the two RGB colors
+        r = int(start_color[0] + (end_color[0] - start_color[0]) * ratio)
+        g = int(start_color[1] + (end_color[1] - start_color[1]) * ratio)
+        b = int(start_color[2] + (end_color[2] - start_color[2]) * ratio)
+
+        color = f"\033[38;2;{r};{g};{b}m"
+        print(f"{color}{line}{RESET}")
+
+
 # --- DATABASE FUNCTIONS ---
 def init_db():
     # Initializes SQLite database with deduplication constraints.
@@ -655,12 +689,18 @@ if __name__ == "__main__":
     init_db()
     print(f"{YELLOW}Loading Athena memory...{RESET}")
     conversations = load_memory()
-    print(f"{GREEN}Autonomous Agent initialized successfully.{RESET}")
+    print(f"{GREEN}Autonomous Agent initialized successfully.\n{RESET}")
 
+    # Purple -> Cyan
+    vertical_gradient(
+        ART,
+        start_color=(210, 102, 255),
+        end_color=(147, 144, 255)
+    )
     print("\nAthena is ready. Talk to her naturally:")
-    print(" - 'Find me Data Analyst internships in KL'")
-    print(" - 'Which GPUs did we find earlier under RM 3000?'")
-    print(" - Type '/bye' to exit.")
+    print(" • 'Find me Data Analyst internships in KL'")
+    print(" • 'Which GPUs did we find earlier under RM 3000?'")
+    print(" • Type '/bye' to exit.")
 
     while True:
         user_input = input("\n> ").strip()
@@ -674,6 +714,6 @@ if __name__ == "__main__":
 
         try:
             answer = agent_loop(user_input, conversations)
-            print(f"\n{GREEN}Athena{RESET}: {answer}")
+            print(f"\n{GREEN}[Athena]{RESET}: {answer}")
         except Exception as e:
             print(f"{RED}Agent error: {e}{RESET}")  
