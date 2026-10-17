@@ -7,6 +7,7 @@ import re
 import os
 import sqlite3
 
+# Config
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 MEMORY_FILE = "memory.json"
@@ -77,7 +78,42 @@ def save_research_to_db(entity_name, research_records):
     conn.close()
     return saved_count
 
-            
+def query_datbase(entity_type=None, search_term=None, limit=10):
+    # Retrieves saved items from SQLite database.
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    query = "SELECT entity_type, title, provider, data_json, source_url FROM research_items WHERE 1=1"
+    params = []
+
+    if entity_type:
+        query += " AND entity_type=?"
+        params.append(entity_type.lower())
+
+    if search_term:
+        query += " AND (title LIKE ? OR provider LIKE ? OR data_json LIKE ?)"
+        term = f"%{search_term}%"
+        params.extend([term, term, term])
+
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    results = []
+    for row in rows:
+        results.append({
+            "entity_type": row[0],
+            "title": row[1],
+            "provider": row[2],
+            "details": json.loads(row[3]),
+            "sorce_url": row[4]
+        })
+    return results
+#---------------------------
+
 # --- MEMORY FUNCTIONS ---
 def load_memory():
     try:
@@ -106,7 +142,7 @@ def save_memory(conversations):
         json.dump(conversations, file, indent=4, ensure_ascii=False)
 # ------------------------
 
-# --- WEB SEARCH FUNCTIONS --- 
+# --- WEB SEARCH FUNCTIONS ----------------------------------------------
 # Search web tool for Athena (Return result of searches, not webpages)
 def research_web(queries, max_results=10, results_per_query=10):
 
@@ -483,6 +519,7 @@ def plan_research(user_prompt):
         return plan
     except json.JSONDecodeError as e:
             raise ValueError(f"{RED}Planner failed to return valid JSON.{RESET}") from e
+# -------------------------------------------------------------------------
 
 if __name__ == "__main__":
 
