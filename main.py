@@ -9,6 +9,7 @@ import sqlite3
 
 # Config
 OLLAMA_URL = "http://localhost:11434/api/chat"
+MODEL_INFO_URL = "http://localhost:11434/api/ps"
 MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 MEMORY_FILE = "memory.json"
 DB_FILE = "athena_research.db"
@@ -28,7 +29,6 @@ ART = r"""
 ██║  ██║   ██║   ██║  ██║███████╗██║ ╚████║██║  ██║
 ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝
 """
-
 
 def vertical_gradient(text, start_color, end_color):
     lines = text.splitlines()
@@ -51,7 +51,20 @@ def vertical_gradient(text, start_color, end_color):
         print(f"{color}{line}{RESET}")
 
 
-# --- DATABASE FUNCTIONS ---
+# ----- RUNNING MODEL INFO -----
+def get_model_info():
+    info = urllib.request.Request(MODEL_INFO_URL)
+    try:
+        with urllib.request.urlopen(info, timeout=10) as response:
+            model_info = json.loads(response.read().decode("utf-8"))
+            print(f"{GREEN}Model Info:{RESET} {model_info}")
+            return model_info
+    except Exception as e:
+        print(f"{RED}Error fetching model info: {e}{RESET}")
+        return None
+
+
+# ----- DATABASE FUNCTIONS -----
 def init_db():
     # Initializes SQLite database with deduplication constraints.
     conn = sqlite3.connect(DB_FILE)
@@ -190,8 +203,33 @@ def export_db_to_csv(entity_type=None):
 
     print(f"{GREEN}Database table saved to CSV successfully.{RESET}")
     return len(db_records)
+
+def clear_database(entity_type=None):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    query = "DELETE FROM research_items WHERE 1=1"
+    params = []
+    cleared = False
+
+    if entity_type:
+        query += " AND entity_type LIKE ?"
+        params.append(f"%{entity_type.lower()}%")
+    try: 
+        cursor.execute(query, params)
+        deleted_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if entity_type:
+            cleared = True
+            print(f"{GREEN}Successfully cleared records of {entity_type} from the database table.{RESET}")
+        else:
+            print(f"{GREEN}Successfully cleared the database table.{RESET}")
+    except Exception as e:
+        print(f"{RED}Error clearing database table: {e}{RESET}")
+
+    return deleted_count
     
-#---------------------------
+
 
 # --- MEMORY FUNCTIONS ---
 def load_memory():
@@ -211,7 +249,7 @@ def load_memory():
         return [
                 {
                 "role": "system",
-                "content": ("You are Athena, a helpful research assistant. "
+                "content": ("You are Athena, a helpful research assistant. All the previous research that you did with the user is stored in sqlite database of athena_research.db"
                 "Answer the user's questions clearly and accurately.")
                 },
             ]
@@ -219,9 +257,12 @@ def load_memory():
 def save_memory(conversations):
     with open(MEMORY_FILE, "w", encoding="utf-8") as file:
         json.dump(conversations, file, indent=4, ensure_ascii=False)
-# ------------------------
+
+
+
 
 # --- WEB SEARCH & EXTRACTION ENGINE FUNCTIONS ----------------------------------------------
+
 # Search web tool for Athena (Return result of searches, not webpages)
 def research_web(queries, max_results=10, results_per_query=10):
 
@@ -433,7 +474,7 @@ def ask_athena(conversation, json_mode=False):
 
     try:
         answer = result["message"]["content"]
-        print(f"Response time: {time.time() - start:.2f} seconds")
+        print(f"Athena response time: {time.time() - start:.2f} seconds.")
 
     except (KeyError, TypeError):
         raise ValueError("Ollama returned an unexpected response format.")
@@ -598,7 +639,9 @@ def plan_research(user_prompt):
         return plan
     except json.JSONDecodeError as e:
             raise ValueError(f"{RED}Planner failed to return valid JSON.{RESET}") from e
-# -------------------------------------------------------------------------
+
+
+
 
 # ------ ATHENA TOOL EXECUTION WRAPPERS ------
 def execute_research_tool(user_request):
@@ -630,18 +673,23 @@ def decide_tool_call(user_input, conversation_history):
         Arguments: {"entity_type": "string or null", "search_term": "string or null"}
 
         2. "web_research": Use when the user requests new, fresh, or unstored information from the internet (e.g. searching for products, job listings, price checks).
+        You might as well validate uncertain information by using this tool to prevent hallucination.
         Arguments: {"research_query": "string (the natural language request)"}
 
         3. "save_database_to_csv": Use when the user requests to save all previous research (which were saved to the database) to csv or use when the user directly ask to export the database to csv.
         Arguments: {"entity_type": "string or null"}
 
-        4. "none": Use for general chat, follow-up explanations, greetings, or questions that do not require external data or database lookups.
+        4. "clear_database": Use when the user requests to clear, wipe, or delete data from the database.
+        CRITICAL RULE: Do not try to guess if the data exists in your memory first. ALWAYS trigger this tool and let the database confirm if records were deleted.
+        Arguments: {"entity_type": "string or null"}
+
+        5. "none": Use for general chat, follow-up explanations, greetings, or questions that do not require external data or database lookups.
         Arguments: {}
 
         Return ONLY a valid JSON object matching this schema:
         {
             "thought": "Brief 1-sentence reasoning for tool selection",
-            "tool": "query_database" | "web_research" | "save_database_to_csv" | "none",
+            "tool": "query_database" | "web_research" | "save_database_to_csv" | "clear_database" | "none",
             "args": {}
         }
     """
@@ -687,31 +735,69 @@ def agent_loop(user_input, conversation_history):
         research_req = args.get("research_query", user_input)
         tool_summary = execute_research_tool(research_req)
 
-        recent_items = query_database(limit=5)
-        tool_context = (
-            f"SYSTEM TOOL RESULT ({tool_summary}):\n"
-            f"Here are the newly scraped items saved to the database:\n"
-            f"{json.dumps(recent_items, indent=2, ensure_ascii=False)}"
-        )
+        if "No research records" in tool_summary or "error" in tool_summary.lower():
+            tool_context = (
+                f"SYSTEM TOOL RESULT: Web search failed.\n"
+                f"Status: {tool_summary}\n"
+                f"Inform the user that no new data could be extracted for their query."
+            )
+        else:
+            recent_items = query_database(limit=5)
+            tool_context = (
+                f"SYSTEM TOOL RESULT ({tool_summary}):\n"
+                f"Here are the newly scraped items saved to the database:\n"
+                f"{json.dumps(recent_items, indent=2, ensure_ascii=False)}"
+            )
 
     elif tool == "query_database":
         entity = args.get("entity_type")
         term = args.get("search_term")
         db_items = query_database(entity_type=entity, search_term=term, limit=10)
-        tool_context = (
-            f"SYSTEM TOOL RESULT (Database Query):\n"
-            f"Found {len(db_items)} items in SQLite database:\n"
-            f"{json.dumps(db_items, indent=2, ensure_ascii=False)}"
-        )
+        if db_items:
+            tool_context = (
+                f"SYSTEM TOOL RESULT (Database Query):\n"
+                f"Found {len(db_items)} items in SQLite database:\n"
+                f"{json.dumps(db_items, indent=2, ensure_ascii=False)}"
+            )
+        else:
+            tool_context = (
+                f"SYSTEM TOOL RESULT (Database Query):\n"
+                f"Found 0 items in SQLite database:\n"
+            )
 
     elif tool == "save_database_to_csv":
         entity = args.get("entity_type")
         records_count = export_db_to_csv(entity)
-        tool_context = (
-            f"SYSTEM TOOL RESULT (Export CSV):\n"
-            f"Successfully exported {records_count} '{entity}' records to {entity}.csv.\n"
-        )
+        if records_count:
+            tool_context = (
+                f"SYSTEM TOOL RESULT (Export CSV):\n"
+                f"Successfully exported {records_count} '{entity}' records to {entity}.csv.\n"
+            )
+        else:
+            tool_context = (
+                f"SYSTEM TOOL RESULT (Export CSV):\n"
+                f"Successfully exported 0 '{entity}' records to {entity}.csv.\n"
+            )
 
+    elif tool == "clear_database":
+        entity = args.get("entity_type")
+        deleted_count = clear_database(entity)
+        
+        if deleted_count == -1:
+            tool_context = "SYSTEM TOOL RESULT: An error occurred while trying to access the database."
+        elif deleted_count == 0:
+            target = f"'{entity}' records" if entity else "any records"
+            tool_context = (
+                f"SYSTEM TOOL RESULT (Clear Database):\n"
+                f"Found 0 {target} to delete. The database is already clean of this data.\n"
+                f"Inform the user."
+            )
+        else:
+            target = f"'{entity}' records" if entity else "ALL records"
+            tool_context = (
+                f"SYSTEM TOOL RESULT (Clear Database):\n"
+                f"Successfully deleted {deleted_count} {target} from the database.\n"
+            )
 
     messages_for_answer = list(conversation_history)
 
@@ -739,6 +825,8 @@ if __name__ == "__main__":
     conversations = load_memory()
     print(f"{GREEN}Autonomous Agent initialized successfully.\n{RESET}")
 
+    get_model_info()
+
     # Purple -> Cyan
     vertical_gradient(
         ART,
@@ -746,7 +834,7 @@ if __name__ == "__main__":
         end_color=(147, 144, 255)
     )
     print("\n--------------------------------------------------")
-    print("Athena is ready. Talk to her naturally:")
+    print("Athena is ready. Talk to it naturally:")
     print(" • 'Find me Data Analyst internships in KL'")
     print(" • 'Which GPUs did we find earlier under RM 3000?'")
     print(" • Type '/bye' to exit.")
