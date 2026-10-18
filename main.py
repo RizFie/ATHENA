@@ -372,11 +372,15 @@ def read_webpage(url):
                 "error": f"Blocked by Anti-bot wall (HTTP {response.status_code})."
             }
 
+        # Extract actual webpage title if present
+        title_match = re.search(r'<title>(.*?)</title>', raw_html, re.IGNORECASE | re.DOTALL)
+        page_title = title_match.group(1).strip() if title_match else "Extracted via local curl_cffi"
+
         clean_markdown = markdownify(raw_html, heading_style="ATX")
 
         return {
             "url": url,
-            "title": "Extracted via local curl_cffi",
+            "title": page_title,
             "content": clean_markdown,
             "error": None
         }
@@ -518,7 +522,7 @@ def extract_structured_data(page, fields, focus_keywords=None):
     # print(f"Raw page length: {len(raw_content)} chars")
 
     # Shrink the raw webpages for llm
-    trimmed_content = trim_webpage_for_llm(raw_content, focus_keywords=focus_keywords, max_chars=2500)
+    trimmed_content = trim_webpage_for_llm(raw_content, focus_keywords=focus_keywords, max_chars=3500)
 
     # --- DEBUG PRINTS ---
     print(f"\n{BLUE}[DEBUG] Trimmed Page Content Length: {len(trimmed_content)} chars{RESET}")
@@ -654,7 +658,7 @@ def plan_research(user_prompt):
             "entity_name": "string (A plural noun, e.g. 'A plural noun for the item, e.g., 'gpus', 'motorcycles', 'papers', 'jobs')",
             "custom_fields": {{
                 "item_name_or_title": "string (Always include the main name/title of the item)",
-                "provider_or_company": "string (Always include the company/seller/creator/related attributes)",
+                "provider_or_company": "string (Always include the company/seller/creator/related attributes) (CRITICAL: Extract the EXACT seller username or company name. DO NOT invent or guess generic labels like 'Malaysia seller' or 'store')",
                 "Insert_Dynamic_Key_1": "Expected data type/description",
                 "Insert_Dynamic_Key_2": "Expected data type/description",
                 "link": "string or null (For example: link for each job/item/etc.) (CRITICAL: Must be the specific application or product URL for this EXACT item. DO NOT copy the general search page URL. If no specific link exists, return null)"
@@ -855,7 +859,12 @@ def agent_loop(user_input, conversation_history):
                 f"Successfully deleted {deleted_count} {target} from the database.\n"
             )
 
-    messages_for_answer = list(conversation_history)
+    # Prevent overlap duplication if history is small
+    if len(conversation_history) > 10:
+        # First 2 (System context) + Latest 8 (Recent chat)
+        messages_for_answer = conversation_history[:2] + conversation_history[-8:]
+    else:
+        messages_for_answer = list(conversation_history)
 
     final_user_prompt = user_input
     if tool_context:
@@ -901,7 +910,6 @@ if __name__ == "__main__":
 └────────────────────────────────────────────────────┘
     """
 
-    print("\n")
     print(athena_menu)
 
     while True:
