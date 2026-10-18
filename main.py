@@ -6,6 +6,12 @@ import time
 import re
 import csv
 import sqlite3
+import os
+import subprocess
+
+# Enable ANSI colors for Windows legacy terminals
+if os.name == 'nt':
+    subprocess.run("", shell=True)
 
 # Config
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -342,36 +348,41 @@ def inline_markdown_references(content, base_url=""):
 # Read page tool for Athena, return page
 def read_webpage(url):
     try:
-        with DDGS(timeout=15) as ddgs:
-            page = ddgs.extract(url)
+        jina_url = f"https://r.jina.ai/{url}"
 
-        if not isinstance(page, dict):
-            return {
-                "url":url,
-                "title":"",
-                "content":"",
-                "error":"Unexpected response format."
+        headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/event-stream"
             }
 
-        raw_content = page.get("content","")
-        page_url = page.get("url",url)
-        clean_content = inline_markdown_references(raw_content, base_url=page_url)
-        # print(f"Cleaned Content Length: {len(clean_content)}")
+        req = urllib.request.Request(jina_url, headers=headers)
+
+        with urllib.request.urlopen(req, timeout=20) as response:
+            raw_content = response.read().decode("utf-8")
+
+        # Jina returns markdown. If it's suspiciously short, it likely hit a hard wall.
+        if len(raw_content) < 150:
+            return {
+                "url": url,
+                "title": "",
+                "content": "",
+                "error": "Content too short, likely blocked by aggressive anti-bot wall."
+            }
+
+        clean_content = inline_markdown_references(raw_content, base_url=url)
 
         return {
-            "url":page_url,
-            "title":page.get("title", ""),
-            "content":clean_content,
-            "error":None
+            "url": url,
+            "title": "Extracted via Jina API",
+            "content": clean_content,
+            "error": None
         }
-
     except Exception as e:
-        # Return a dict
         return {
             "url": url,
             "title": "",
             "content": "",
-            "error": str(e),
+            "error": f"Jina Extraction Error: {str(e)}"
         }
 
 # Sliding Context Window helper function (The same one in RAG), used in extract_structured_data
@@ -601,8 +612,8 @@ def research_pipeline(queries, fields, max_results=10, pages_to_read=5):
         except Exception as e:
             print(f"{RED}[PIPELINE] Extraction error on {url}: {e}{RESET}")
 
-        print(f"{GREEN}[PIPELINE] Completed! Successfully extracted {len(extracted_records)} pages.{RESET}")
-        return extracted_records
+    print(f"{GREEN}[PIPELINE] Completed! Successfully extracted {len(extracted_records)} pages.{RESET}")
+    return extracted_records
 
 # Function for the llm to return a dynamic schema which include fields to be passed to pipeline
 # Return of research pipeline are based on the dynamic schemas
@@ -846,7 +857,7 @@ if __name__ == "__main__":
         if not user_input:
             continue
 
-        if user_input.lower() == "/bye":
+        if "/bye" in user_input.lower():
             print("Goodbye!")
             break
 
