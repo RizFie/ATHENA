@@ -8,6 +8,8 @@ import csv
 import sqlite3
 import os
 import subprocess
+from curl_cffi import requests
+from markdownify import markdownify
 
 # Enable ANSI colors for Windows legacy terminals
 if os.name == 'nt':
@@ -121,6 +123,10 @@ def save_research_to_db(entity_name, research_records):
                 or item.get("apply_link")
                 or "Couldn't retrieve specific link."
             )
+
+            # CLEAN TRACKING URLs HERE
+            if link and "?" in link:
+                link = link.split("?")[0]
 
             try:
                 cursor.execute("""
@@ -348,33 +354,30 @@ def inline_markdown_references(content, base_url=""):
 # Read page tool for Athena, return page
 def read_webpage(url):
     try:
-        jina_url = f"https://r.jina.ai/{url}"
+        response = requests.get(
+            url,
+            impersonate="chrome120",
+            timeout=20
+        )
 
-        headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/event-stream"
-            }
+        raw_html = response.text
 
-        req = urllib.request.Request(jina_url, headers=headers)
-
-        with urllib.request.urlopen(req, timeout=20) as response:
-            raw_content = response.read().decode("utf-8")
-
-        # Jina returns markdown. If it's suspiciously short, it likely hit a hard wall.
-        if len(raw_content) < 150:
+        # Instantly flag Cloudflare / 403 challenges as unreadable errors
+        blocked_signals = ["403: forbidden", "just a moment...", "attention required!", "cf-browser-verification"]
+        if response.status_code in [401, 403] or any(signal in raw_html.lower() for signal in blocked_signals):
             return {
                 "url": url,
                 "title": "",
                 "content": "",
-                "error": "Content too short, likely blocked by aggressive anti-bot wall."
+                "error": f"Blocked by Anti-bot wall (HTTP {response.status_code})."
             }
 
-        clean_content = inline_markdown_references(raw_content, base_url=url)
+        clean_markdown = markdownify(raw_html, heading_style="ATX")
 
         return {
             "url": url,
-            "title": "Extracted via Jina API",
-            "content": clean_content,
+            "title": "Extracted via local curl_cffi",
+            "content": clean_markdown,
             "error": None
         }
     except Exception as e:
@@ -382,14 +385,21 @@ def read_webpage(url):
             "url": url,
             "title": "",
             "content": "",
-            "error": f"Jina Extraction Error: {str(e)}"
+            "error": f"Local Scrape Error: {str(e)}"
         }
 
 # Sliding Context Window helper function (The same one in RAG), used in extract_structured_data
-def trim_webpage_for_llm(content, focus_keywords=None, window_before=2, window_after=6, max_chars=5000):
+def trim_webpage_for_llm(content, focus_keywords=None, window_before=2, window_after=6, max_chars=2500):
 
     if not content:
         return ""
+
+    # Bypass Carousell / e-commerce navigation menus
+    nav_marker = content.find("Skip to content")
+    if nav_marker != -1:
+        # Move past standard header links
+        content = content[nav_marker + 200:]
+
     if not focus_keywords:
         return content[:max_chars]
 
@@ -508,10 +518,11 @@ def extract_structured_data(page, fields, focus_keywords=None):
     # print(f"Raw page length: {len(raw_content)} chars")
 
     # Shrink the raw webpages for llm
-    trimmed_content = trim_webpage_for_llm(raw_content, focus_keywords=focus_keywords, max_chars=5000)
-    #print(f"Trimmed length sent to LLM: {len(trimmed_content)} chars")
-    #print(f"\n--- Trimmed Content ---")
-    #print(trimmed_content)
+    trimmed_content = trim_webpage_for_llm(raw_content, focus_keywords=focus_keywords, max_chars=2500)
+
+    # --- DEBUG PRINTS ---
+    print(f"\n{BLUE}[DEBUG] Trimmed Page Content Length: {len(trimmed_content)} chars{RESET}")
+    print(f"{BLUE}[DEBUG] First 300 chars sent to LLM:\n{trimmed_content[:300]}\n---{RESET}")
 
     # Structure the prompt for the llm
     prompt = f"""
@@ -551,6 +562,8 @@ def extract_structured_data(page, fields, focus_keywords=None):
             ],
             json_mode=True
         )
+    # --- DEBUG PRINT FOR LLM RESPONSE ---
+    print(f"{YELLOW}[DEBUG] Raw Qwen Extraction Response:\n{response}\n---{RESET}")
 
     # Parse the JSON string into Python dict
     try:
@@ -601,7 +614,8 @@ def research_pipeline(queries, fields, max_results=10, pages_to_read=5):
         page = read_webpage(url)
 
         if page["error"] or not page["content"]:
-            print(f"{RED}[PIPELINE] Skipping unreadable page: {url} ({page['error']}){RESET}")
+            error_msg = page["error"] or "Page returned empty content"
+            print(f"{RED}[PIPELINE] Skipping unreadable page: {url} ({error_msg}){RESET}")
             continue
 
         try:
@@ -622,21 +636,28 @@ def plan_research(user_prompt):
 
     planner_prompt = f"""
         You are an AI research architect.
-        Analyze the user's request and design the optimal search queries and JSON data schema.
+        Analyze the user's request and design optimal search engine queries and a JSON data schema.
+
+        CRITICAL SEARCH QUERY RULES:
+        1. Keep search queries SHORT and BROAD (2 to 4 keywords max).
+           Good: "AI internship Kuala Lumpur", "Machine Learning intern Selangor", "Data Science intern KL", "Used RTX5090 KL", "Prayer Time Merbok"
+           Bad: "RAG engineer internship Selangor Malaysia 14 March 2027 to 17 June 2027"
+        2. NEVER include exact date ranges, specific years (e.g., '2027'), or long constraint chains in search queries—search engines will return 0 results.
+        3. Put technical terms (PyTorch, LLM, RAG) into "focus_keywords" so the scraper finds them on the page.
 
         User request: "{user_prompt}"
 
         Return ONLY valid JSON matching this exact structure:
         {{
-            "queries": ["string (Search engine queries)"],
-            "focus_keywords": ["string (Words to look for on the page)"],
-            "entity_name": "string (A plural noun for the item, e.g., 'gpus', 'motorcycles', 'papers', 'jobs')",
+            "queries": ["string (Short 2-4 word search engine queries)"],
+            "focus_keywords": ["string (Words to look for on the page, e.g. 'LLM', 'March', 'gpus', 'prayer')"],
+            "entity_name": "string (A plural noun, e.g. 'A plural noun for the item, e.g., 'gpus', 'motorcycles', 'papers', 'jobs')",
             "custom_fields": {{
                 "item_name_or_title": "string (Always include the main name/title of the item)",
                 "provider_or_company": "string (Always include the company/seller/creator/related attributes)",
                 "Insert_Dynamic_Key_1": "Expected data type/description",
                 "Insert_Dynamic_Key_2": "Expected data type/description",
-                "link": string or null (For example: link for each job/item/etc.)
+                "link": "string or null (For example: link for each job/item/etc.) (CRITICAL: Must be the specific application or product URL for this EXACT item. DO NOT copy the general search page URL. If no specific link exists, return null)"
             }}
         }}
     """
@@ -664,7 +685,7 @@ def execute_research_tool(user_request):
         queries=plan["queries"],
         fields=dynamic_schema,
         max_results=10,
-        pages_to_read=5
+        pages_to_read=2
     )
 
     if not records:
@@ -673,7 +694,11 @@ def execute_research_tool(user_request):
     saved_count = save_research_to_db(plan["entity_name"], records)
     return f"Research complete. Saved {saved_count} new unique '{plan['entity_name']}' items to SQLite database."
 
-# --- AGENTIC TOOL CALL --- used in agent loop
+
+
+
+
+# --- AGENTIC TOOL CALL ---
 def decide_tool_call(user_input, conversation_history):
     system_instruction = """
         You are the tool routing engine for Athena, an autonomous research agent.
@@ -723,6 +748,10 @@ def decide_tool_call(user_input, conversation_history):
     except json.JSONDecodeError:
         return {"thought": "Fallback due to JSON decode error.", "tool": "none", "args": {}}
 
+
+
+
+
 # --- AUTONOMOUS AGENT LOOP ---
 def agent_loop(user_input, conversation_history):
     """
@@ -754,10 +783,26 @@ def agent_loop(user_input, conversation_history):
             )
         else:
             recent_items = query_database(limit=5)
+
+            compact_items = []
+            for item in recent_items:
+                dynamic_details = item.get("details", {}).copy()
+
+                # Pop out fields we already show at the top level to save tokens
+                dynamic_details.pop("item_name_or_title", None)
+                dynamic_details.pop("provider_or_company", None)
+                dynamic_details.pop("link", None)
+
+                compact_items.append({
+                    "title": item.get("title"),
+                    "provider": item.get("provider"),
+                    "details": dynamic_details,  # Passes all dynamic fields (price, skills, etc.)
+                    "link": item.get("link")
+                })
             tool_context = (
                 f"SYSTEM TOOL RESULT ({tool_summary}):\n"
-                f"Here are the newly scraped items saved to the database:\n"
-                f"{json.dumps(recent_items, indent=2, ensure_ascii=False)}"
+                f"Newly scraped items saved to database:\n"
+                f"{json.dumps(compact_items, ensure_ascii=False)}"
             )
 
     elif tool == "query_database":
@@ -822,6 +867,7 @@ def agent_loop(user_input, conversation_history):
 
     messages_for_answer.append({"role": "user", "content": final_user_prompt})
 
+    print(f"\nAthena is processing data...")
     answer = ask_athena(messages_for_answer)
 
     conversation_history.append({"role": "user", "content": user_input})
@@ -844,12 +890,19 @@ if __name__ == "__main__":
         start_color=(210, 102, 255),
         end_color=(147, 144, 255)
     )
-    print("\n--------------------------------------------------")
-    print("Athena is ready. Talk to it naturally:")
-    print(" • 'Find me Data Analyst internships in KL'")
-    print(" • 'Which GPUs did we find earlier under RM 3000?'")
-    print(" • Type '/bye' to exit.")
-    print("--------------------------------------------------")
+
+
+    athena_menu = r"""
+┌────────────────────────────────────────────────────┐
+│  Athena is ready. Talk to it naturally:            │
+│  • 'Find me Data Analyst internships in KL'        │
+│  • 'Which GPUs did we find earlier under RM 3000?' │
+│  • Type '/bye' to exit.                            │
+└────────────────────────────────────────────────────┘
+    """
+
+    print("\n")
+    print(athena_menu)
 
     while True:
         user_input = input(f"\n{GREEN}[INPUT]{RESET} > ").strip()
