@@ -1,6 +1,6 @@
 import json
 import urllib.request
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 from ddgs import DDGS
 import time
 import re
@@ -101,7 +101,7 @@ def save_research_to_db(entity_name, research_records):
     saved_count = 0
 
     for record in research_records:
-        items = record.get(entity_name, [])
+        items = record.get(entity_name) or []
         source_url = record.get("source_url","")
 
         for item in items:
@@ -125,9 +125,23 @@ def save_research_to_db(entity_name, research_records):
                 or "Couldn't retrieve specific link."
             )
 
-            # CLEAN TRACKING URLs HERE
-            if link and "?" in link:
-                link = link.split("?")[0]
+            # --- SMART URL CLEANING & RESOLUTION ---
+            if link and link != "Couldn't retrieve specific link.":
+                # 1. Convert relative links (/job/95065808) to absolute URLs
+                if link.startswith("/"):
+                    link = urljoin(source_url, link)
+
+                # 2. Site-specific query cleaning
+                if "indeed.com" in link and "jk=" in link:
+                    # Preserve ONLY the essential 'jk' job ID for Indeed
+                    parsed = urlparse(link)
+                    query = parse_qs(parsed.query)
+                    if "jk" in query:
+                        clean_query = urlencode({"jk": query["jk"][0]})
+                        link = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{clean_query}"
+                elif "?" in link:
+                    # Standard strip for Carousell, JobStreet, etc.
+                    link = link.split("?")[0]
 
             try:
                 cursor.execute("""
@@ -307,6 +321,8 @@ def research_web(queries, max_results=10, results_per_query=10):
                     print(f"No matches returned: {query}")
                 else:
                     print(f"Search error for {query}: {e}")
+
+        time.sleep(1.5)
 
     return list(found.values())[:max_results]
 
@@ -523,8 +539,8 @@ def extract_structured_data(page, fields, focus_keywords=None):
     trimmed_content = trim_webpage_for_llm(raw_content, focus_keywords=focus_keywords, max_chars=3500)
 
     # --- DEBUG PRINTS ---
-    print(f"\n{BLUE}[DEBUG] Trimmed Page Content Length: {len(trimmed_content)} chars{RESET}")
-    print(f"{BLUE}[DEBUG] First 300 chars sent to LLM:\n{trimmed_content[:300]}\n---{RESET}")
+    #print(f"\n{BLUE}[DEBUG] Trimmed Page Content Length: {len(trimmed_content)} chars{RESET}")
+    #print(f"{BLUE}[DEBUG] First 300 chars sent to LLM:\n{trimmed_content[:300]}\n---{RESET}")
 
     # Structure the prompt for the llm
     prompt = f"""
@@ -547,7 +563,7 @@ def extract_structured_data(page, fields, focus_keywords=None):
         """
 
     # Calls out Athena
-    print(f"\n{YELLOW}Handing off text data to Athena. This may take a while.{RESET}")
+    print(f"\n{GREY}Handing off web data to Athena. This may take a while...{RESET}")
     response = ask_athena(
             [
                 {
@@ -563,7 +579,7 @@ def extract_structured_data(page, fields, focus_keywords=None):
             json_mode=True
         )
     # --- DEBUG PRINT FOR LLM RESPONSE ---
-    print(f"{YELLOW}[DEBUG] Raw Qwen Extraction Response:\n{response}\n---{RESET}")
+    #print(f"{YELLOW}[DEBUG] Raw Qwen Extraction Response:\n{response}\n---{RESET}")
 
     # Parse the JSON string into Python dict
     try:
@@ -575,10 +591,11 @@ def extract_structured_data(page, fields, focus_keywords=None):
         raise ValueError("Error: Expected a JSON Object.")
 
     data["source_url"] = page["url"]
+    
     return data
     
 # Full Pipeline for research work
-def research_pipeline(queries, fields, max_results=10, pages_to_read=5):
+def research_pipeline(queries, fields, entity_name, max_results=10, pages_to_read=5):
     """
     Orchestrates the end-to-end Athena research process:
     1. Searches the web for matching URLs.
@@ -622,7 +639,8 @@ def research_pipeline(queries, fields, max_results=10, pages_to_read=5):
             # 3. Reads and trims each webpage using context windows.
             data = extract_structured_data(page, fields=fields, focus_keywords=focus_keywords)
             extracted_records.append(data)
-            print(f"{GREEN}[PIPELINE] Successfully extracted data from page: {page['title']}{RESET}")
+            saved = save_research_to_db(entity_name, [data])
+            print(f"{GREEN}[PIPELINE] Saved {saved} new items from page {i} to DB!{RESET}")
         except Exception as e:
             print(f"{RED}[PIPELINE] Extraction error on {url}: {e}{RESET}")
 
@@ -654,7 +672,7 @@ def plan_research(user_prompt):
 
         Return ONLY valid JSON matching this exact structure:
         {{
-            "queries": ["string (Short 2-4 word search engine queries)"],
+            "queries": ["string (Generate 2 to 3 distinct, short 2-4 word queries max)"],
             "focus_keywords": ["string (Words to look for on the page)"],
             "entity_name": "string (Plural noun for the items, e.g., 'gpus', 'internships', 'prayers')",
             "custom_fields": {{
@@ -684,18 +702,19 @@ def execute_research_tool(user_request):
     dynamic_schema = {plan["entity_name"]: [plan["custom_fields"]]}
 
     print(f"{YELLOW}[TOOL] Executing research for entity: '{plan['entity_name']}'{RESET}")
+    # Change pages_to_read accordingly
     records = research_pipeline(
         queries=plan["queries"],
         fields=dynamic_schema,
+        entity_name=plan['entity_name'],
         max_results=10,
-        pages_to_read=5
+        pages_to_read=10
     )
 
     if not records:
         return "No research records could be extracted."
 
-    saved_count = save_research_to_db(plan["entity_name"], records)
-    return f"Research complete. Saved {saved_count} new unique '{plan['entity_name']}' items to SQLite database."
+    return f"Research complete. Scraped and saved records for '{plan['entity_name']}' to SQLite database."
 
 
 
