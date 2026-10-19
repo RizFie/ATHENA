@@ -28,6 +28,7 @@ GREEN = "\033[32m"
 YELLOW = "\033[33m"
 BLUE = "\033[34m"
 RESET = "\033[0m"
+GREY = "\033[1;30m"
 
 ART = r"""
  █████╗ ████████╗██╗  ██╗███████╗███╗   ██╗ █████╗
@@ -142,7 +143,7 @@ def save_research_to_db(entity_name, research_records):
     conn.close()
     return saved_count
 
-def query_database(entity_type=None, search_term=None, limit=10):
+def query_database(entity_type=None, limit=10):
     # Retrieves saved items from SQLite database.
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -151,13 +152,8 @@ def query_database(entity_type=None, search_term=None, limit=10):
     params = []
 
     if entity_type:
-        query += " AND entity_type=?"
-        params.append(entity_type.lower())
-
-    if search_term:
-        query += " AND (title LIKE ? OR provider LIKE ? OR data_json LIKE ?)"
-        term = f"%{search_term}%"
-        params.extend([term, term, term])
+        query += " AND entity_type LIKE ?"
+        params.append(f"%{entity_type}%")
 
     query += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
@@ -499,7 +495,9 @@ def ask_athena(conversation, json_mode=False):
 
     try:
         answer = result["message"]["content"]
+        input_token_length = result["prompt_eval_count"]
         print(f"Athena response time: {time.time() - start:.2f} seconds.")
+        print(f"Input token length: {input_token_length}")
 
     except (KeyError, TypeError):
         raise ValueError("Ollama returned an unexpected response format.")
@@ -531,20 +529,18 @@ def extract_structured_data(page, fields, focus_keywords=None):
     # Structure the prompt for the llm
     prompt = f"""
             You are a structured research data extractor.
-            Extract information from the webpage excerpt below.
+            Extract factual information from the webpage excerpt below into the requested JSON schema.
 
-            Return ONLY valid JSON.
-            Do not invent missing information.
-            Use null or empty lists [] for unknown values.
+            RULES:
+            1. Extract all matching items found in the text.
+            2. Look inside Markdown link formatting like `[username](/u/...)` to extract seller/company names, and `[title](/p/...)` or `[title](/job/...)` for product/application links.
+            3. Use null for fields where information is completely missing.
 
             Fields to extract:
             {json.dumps(fields, ensure_ascii=False)}
 
-            Source URL:
-            {page["url"]}
-
-            Webpage Title:
-            {page["title"]}
+            Source URL: {page["url"]}
+            Webpage Title: {page["title"]}
 
             Webpage Excerpt:
             {trimmed_content}
@@ -640,28 +636,31 @@ def plan_research(user_prompt):
 
     planner_prompt = f"""
         You are an AI research architect.
-        Analyze the user's request and design optimal search engine queries and a JSON data schema.
+        Analyze the user's request and design optimal search engine queries and a dynamic JSON data schema.
 
         CRITICAL SEARCH QUERY RULES:
         1. Keep search queries SHORT and BROAD (2 to 4 keywords max).
-           Good: "AI internship Kuala Lumpur", "Machine Learning intern Selangor", "Data Science intern KL", "Used RTX5090 KL", "Prayer Time Merbok"
+           Good: "AI internship Kuala Lumpur", "used rtx 2060 malaysia", "Prayer Time Merbok"
            Bad: "RAG engineer internship Selangor Malaysia 14 March 2027 to 17 June 2027"
-        2. NEVER include exact date ranges, specific years (e.g., '2027'), or long constraint chains in search queries—search engines will return 0 results.
-        3. Put technical terms (PyTorch, LLM, RAG) into "focus_keywords" so the scraper finds them on the page.
+        2. NEVER include exact date ranges, specific years (e.g., '2027'), or long constraint chains in search queries.
+        3. Put technical/specific filter terms into "focus_keywords".
+
+        CRITICAL DYNAMIC SCHEMA RULES:
+        1. "custom_fields" MUST include "item_name_or_title", "provider_or_company", and "link".
+        2. INVENT 2 to 4 additional relevant snake_case keys tailored directly to the request (e.g. price, location, condition, monthly_allowance, required_skills, prayer_name, time).
+        3. NEVER output placeholder keys like "Insert_Dynamic_Key_1" or "Insert_Dynamic_Key_2". Always invent descriptive field names!
 
         User request: "{user_prompt}"
 
         Return ONLY valid JSON matching this exact structure:
         {{
             "queries": ["string (Short 2-4 word search engine queries)"],
-            "focus_keywords": ["string (Words to look for on the page, e.g. 'LLM', 'March', 'gpus', 'prayer')"],
-            "entity_name": "string (A plural noun, e.g. 'A plural noun for the item, e.g., 'gpus', 'motorcycles', 'papers', 'jobs')",
+            "focus_keywords": ["string (Words to look for on the page)"],
+            "entity_name": "string (Plural noun for the items, e.g., 'gpus', 'internships', 'prayers')",
             "custom_fields": {{
-                "item_name_or_title": "string (Always include the main name/title of the item)",
-                "provider_or_company": "string (Always include the company/seller/creator/related attributes) (CRITICAL: Extract the EXACT seller username or company name. DO NOT invent or guess generic labels like 'Malaysia seller' or 'store')",
-                "Insert_Dynamic_Key_1": "Expected data type/description",
-                "Insert_Dynamic_Key_2": "Expected data type/description",
-                "link": "string or null (For example: link for each job/item/etc.) (CRITICAL: Must be the specific application or product URL for this EXACT item. DO NOT copy the general search page URL. If no specific link exists, return null)"
+                "item_name_or_title": "string (Main name/title of item/job/event)",
+                "provider_or_company": "string (Exact seller username, company, or platform name)",
+                "link": "string or null (Direct URL for this specific listing)"
             }}
         }}
     """
@@ -684,12 +683,12 @@ def execute_research_tool(user_request):
     plan = plan_research(user_request)
     dynamic_schema = {plan["entity_name"]: [plan["custom_fields"]]}
 
-    print(f"{YELLOW}[Tool] Executing research for entity: '{plan['entity_name']}'{RESET}")
+    print(f"{YELLOW}[TOOL] Executing research for entity: '{plan['entity_name']}'{RESET}")
     records = research_pipeline(
         queries=plan["queries"],
         fields=dynamic_schema,
         max_results=10,
-        pages_to_read=2
+        pages_to_read=5
     )
 
     if not records:
@@ -710,7 +709,7 @@ def decide_tool_call(user_input, conversation_history):
 
         Available Tools:
         1. "query_database": Use when the user asks about previously saved/researched items, summaries of stored data, or comparisons of existing database records.
-        Arguments: {"entity_type": "string or null", "search_term": "string or null"}
+        Arguments: {"entity_type": "string or null"}
 
         2. "web_research": Use when the user requests new, fresh, or unstored information from the internet (e.g. searching for products, job listings, price checks).
         You might as well validate uncertain information by using this tool to prevent hallucination.
@@ -770,6 +769,7 @@ def agent_loop(user_input, conversation_history):
     args = decision.get("args",{})
     thought = decision.get("thought","")
 
+    print(f"\n{GREY}Athena is thinking...{RESET}")
     print(f"\n{YELLOW}[Athena Thought]: {thought}{RESET}")
     print(f"{BLUE}[Tool Triggered]: {tool} | Args: {args}{RESET}")
 
@@ -811,8 +811,7 @@ def agent_loop(user_input, conversation_history):
 
     elif tool == "query_database":
         entity = args.get("entity_type")
-        term = args.get("search_term")
-        db_items = query_database(entity_type=entity, search_term=term, limit=10)
+        db_items = query_database(entity_type=entity, limit=10)
         if db_items:
             tool_context = (
                 f"SYSTEM TOOL RESULT (Database Query):\n"
@@ -876,7 +875,7 @@ def agent_loop(user_input, conversation_history):
 
     messages_for_answer.append({"role": "user", "content": final_user_prompt})
 
-    print(f"\nAthena is processing data...")
+    print(f"\n{GREY}Athena is processing data...{RESET}")
     answer = ask_athena(messages_for_answer)
 
     conversation_history.append({"role": "user", "content": user_input})
