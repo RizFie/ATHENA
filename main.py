@@ -157,12 +157,12 @@ def save_research_to_db(entity_name, research_records):
     conn.close()
     return saved_count
 
-def query_database(entity_type=None, limit=10):
+def query_database(entity_type=None, limit=15):
     # Retrieves saved items from SQLite database.
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    query = "SELECT entity_type, title, provider, data_json, source_url, link FROM research_items WHERE 1=1"
+    query = "SELECT entity_type, data_json FROM research_items WHERE 1=1"
     params = []
 
     if entity_type:
@@ -180,11 +180,7 @@ def query_database(entity_type=None, limit=10):
     for row in rows:
         results.append({
             "entity_type": row[0],
-            "title": row[1],
-            "provider": row[2],
-            "details": json.loads(row[3]),
-            "source_url": row[4],
-            "link": row[5]
+            "details": json.loads(row[1])
         })
     return results
 
@@ -724,31 +720,25 @@ def execute_research_tool(user_request):
 def decide_tool_call(user_input, conversation_history):
     system_instruction = """
         You are the tool routing engine for Athena, an autonomous research agent.
-        Analyze the user's message and select the single best tool to execute.
+        Analyze the user's message and select ONE OR MORE tools to execute in order.
 
         Available Tools:
-        1. "query_database": Use when the user asks about previously saved/researched items, summaries of stored data, or comparisons of existing database records.
-        Arguments: {"entity_type": "string or null"}
+        1. "query_database": Query stored records. Argument "entity_type" MUST be a single short noun (e.g. "internships", "gpus").
+        2. "web_research": Search and scrape the web for new data. Argument "research_query" (string).
+        3. "save_database_to_csv": Export records to CSV. Argument "entity_type" (string or null).
+        4. "clear_database": Delete records. Argument "entity_type" (string or null).
+        5. "none": General conversation, greetings, or follow-ups. Arguments: {}.
 
-        2. "web_research": Use when the user requests new, fresh, or unstored information from the internet (e.g. searching for products, job listings, price checks).
-        You might as well validate uncertain information by using this tool to prevent hallucination.
-        Arguments: {"research_query": "string (the natural language request)"}
-
-        3. "save_database_to_csv": Use when the user requests to save all previous research (which were saved to the database) to csv or use when the user directly ask to export the database to csv.
-        Arguments: {"entity_type": "string or null"}
-
-        4. "clear_database": Use when the user requests to clear, wipe, or delete data from the database.
-        CRITICAL RULE: Do not try to guess if the data exists in your memory first. ALWAYS trigger this tool and let the database confirm if records were deleted.
-        Arguments: {"entity_type": "string or null"}
-
-        5. "none": Use for general chat, follow-up explanations, greetings, or questions that do not require external data or database lookups.
-        Arguments: {}
+        CRITICAL MULTI-TOOL RULE:
+        If the user asks to perform two actions (e.g. "check database AND search web"), return BOTH tools in the "tools" array in execution order.
 
         Return ONLY a valid JSON object matching this schema:
         {
-            "thought": "Brief 1-sentence reasoning for tool selection",
-            "tool": "query_database" | "web_research" | "save_database_to_csv" | "clear_database" | "none",
-            "args": {}
+            "thought": "Brief 1-sentence reasoning for selecting these tools",
+            "tools": [
+                {"tool": "query_database", "args": {"entity_type": "internships"}},
+                {"tool": "web_research", "args": {"research_query": "software engineering internship AI KL Selangor"}}
+            ]
         }
     """
 
@@ -784,98 +774,111 @@ def agent_loop(user_input, conversation_history):
     """
 
     decision = decide_tool_call(user_input, conversation_history)
-    tool = decision.get("tool","")
-    args = decision.get("args",{})
     thought = decision.get("thought","")
-
+    tool_contexts = []
     print(f"\n{GREY}Athena is thinking...{RESET}")
     print(f"\n{YELLOW}[Athena Thought]: {thought}{RESET}")
-    print(f"{BLUE}[Tool Triggered]: {tool} | Args: {args}{RESET}")
-
-    tool_context = ""
-
-    if tool == "web_research":
-        research_req = args.get("research_query", user_input)
-        tool_summary = execute_research_tool(research_req)
-
-        if "No research records" in tool_summary or "error" in tool_summary.lower():
-            tool_context = (
-                f"SYSTEM TOOL RESULT: Web search failed.\n"
-                f"Status: {tool_summary}\n"
-                f"Inform the user that no new data could be extracted for their query."
-            )
-        else:
-            recent_items = query_database(limit=5)
-
-            compact_items = []
-            for item in recent_items:
-                dynamic_details = item.get("details", {}).copy()
-
-                # Pop out fields we already show at the top level to save tokens
-                dynamic_details.pop("item_name_or_title", None)
-                dynamic_details.pop("provider_or_company", None)
-                dynamic_details.pop("link", None)
-
-                compact_items.append({
-                    "title": item.get("title"),
-                    "provider": item.get("provider"),
-                    "details": dynamic_details,  # Passes all dynamic fields (price, skills, etc.)
-                    "link": item.get("link")
-                })
-            tool_context = (
-                f"SYSTEM TOOL RESULT ({tool_summary}):\n"
-                f"Newly scraped items saved to database:\n"
-                f"{json.dumps(compact_items, ensure_ascii=False)}"
-            )
-
-    elif tool == "query_database":
-        entity = args.get("entity_type")
-        db_items = query_database(entity_type=entity, limit=10)
-        if db_items:
-            tool_context = (
-                f"SYSTEM TOOL RESULT (Database Query):\n"
-                f"Found {len(db_items)} items in SQLite database:\n"
-                f"{json.dumps(db_items, indent=2, ensure_ascii=False)}"
-            )
-        else:
-            tool_context = (
-                f"SYSTEM TOOL RESULT (Database Query):\n"
-                f"Found 0 items in SQLite database:\n"
-            )
-
-    elif tool == "save_database_to_csv":
-        entity = args.get("entity_type")
-        records_count = export_db_to_csv(entity)
-        if records_count:
-            tool_context = (
-                f"SYSTEM TOOL RESULT (Export CSV):\n"
-                f"Successfully exported {records_count} '{entity}' records to {entity}.csv.\n"
-            )
-        else:
-            tool_context = (
-                f"SYSTEM TOOL RESULT (Export CSV):\n"
-                f"Successfully exported 0 '{entity}' records to {entity}.csv.\n"
-            )
-
-    elif tool == "clear_database":
-        entity = args.get("entity_type")
-        deleted_count = clear_database(entity)
+    
+    for call in decision.get("tools",[]):
+        tool = call.get("tool","")
+        args = call.get("args",{})
         
-        if deleted_count == -1:
-            tool_context = "SYSTEM TOOL RESULT: An error occurred while trying to access the database."
-        elif deleted_count == 0:
-            target = f"'{entity}' records" if entity else "any records"
-            tool_context = (
-                f"SYSTEM TOOL RESULT (Clear Database):\n"
-                f"Found 0 {target} to delete. The database is already clean of this data.\n"
-                f"Inform the user."
-            )
-        else:
-            target = f"'{entity}' records" if entity else "ALL records"
-            tool_context = (
-                f"SYSTEM TOOL RESULT (Clear Database):\n"
-                f"Successfully deleted {deleted_count} {target} from the database.\n"
-            )
+        print(f"{BLUE}[Tool Triggered]: {tool} | Args: {args}{RESET}")
+
+        if tool == "web_research":
+            research_req = args.get("research_query", user_input)
+            tool_summary = execute_research_tool(research_req)
+
+            if "No research records" in tool_summary or "error" in tool_summary.lower():
+                tool_context = (
+                    f"SYSTEM TOOL RESULT: Web search failed.\n"
+                    f"Status: {tool_summary}\n"
+                    f"Inform the user that no new data could be extracted for their query."
+                )
+                tool_contexts.append(tool_context)
+            else:
+                recent_items = query_database(limit=5)
+                compact_items = []
+                for item in recent_items:
+                    dynamic_details = item.get("details", {}).copy()
+
+                    # Pop out fields we already show at the top level to save tokens
+                    dynamic_details.pop("item_name_or_title", None)
+                    dynamic_details.pop("provider_or_company", None)
+                    dynamic_details.pop("link", None)
+
+                    compact_items.append({
+                        "title": item.get("title"),
+                        "provider": item.get("provider"),
+                        "details": dynamic_details,  # Passes all dynamic fields (price, skills, etc.)
+                        "link": item.get("link")
+                    })
+                tool_context = (
+                    f"SYSTEM TOOL RESULT ({tool_summary}):\n"
+                    f"Newly scraped items saved to database:\n"
+                    f"{json.dumps(compact_items, ensure_ascii=False)}"
+                )
+                tool_contexts.append(tool_context)
+
+        elif tool == "query_database":
+            entity = args.get("entity_type")
+            print(f"{YELLOW}[TOOL] Searching local database for: '{entity}'...{RESET}")
+            db_items = query_database(entity_type=entity, limit=10)
+            if db_items:
+                print(f"{GREEN}[TOOL] Found {len(db_items)} matching records in DB!{RESET}")
+                tool_context = (
+                    f"SYSTEM TOOL RESULT (Database Query):\n"
+                    f"Found {len(db_items)} items in SQLite database:\n"
+                    f"{json.dumps(db_items, indent=2, ensure_ascii=False)}"
+                )
+                tool_contexts.append(tool_context)
+            else:
+                tool_context = (
+                    f"SYSTEM TOOL RESULT (Database Query):\n"
+                    f"Found 0 items in SQLite database:\n"
+                )
+                tool_contexts.append(tool_context)
+
+        elif tool == "save_database_to_csv":
+            entity = args.get("entity_type")
+            records_count = export_db_to_csv(entity)
+            if records_count:
+                tool_context = (
+                    f"SYSTEM TOOL RESULT (Export CSV):\n"
+                    f"Successfully exported {records_count} '{entity}' records to {entity}.csv.\n"
+                )
+                tool_contexts.append(tool_context)
+            else:
+                tool_context = (
+                    f"SYSTEM TOOL RESULT (Export CSV):\n"
+                    f"Successfully exported 0 '{entity}' records to {entity}.csv.\n"
+                )
+                tool_contexts.append(tool_context)
+
+        elif tool == "clear_database":
+            entity = args.get("entity_type")
+            deleted_count = clear_database(entity)
+            
+            if deleted_count == -1:
+                tool_context = "SYSTEM TOOL RESULT: An error occurred while trying to access the database."
+                tool_contexts.append(tool_context)
+            elif deleted_count == 0:
+                target = f"'{entity}' records" if entity else "any records"
+                tool_context = (
+                    f"SYSTEM TOOL RESULT (Clear Database):\n"
+                    f"Found 0 {target} to delete. The database is already clean of this data.\n"
+                    f"Inform the user."
+                )
+                tool_contexts.append(tool_context)
+            else:
+                target = f"'{entity}' records" if entity else "ALL records"
+                tool_context = (
+                    f"SYSTEM TOOL RESULT (Clear Database):\n"
+                    f"Successfully deleted {deleted_count} {target} from the database.\n"
+                )
+                tool_contexts.append(tool_context)
+
+    combined_context = "\n\n".join(tool_contexts)
 
     # Prevent overlap duplication if history is small
     if len(conversation_history) > 10:
@@ -885,10 +888,10 @@ def agent_loop(user_input, conversation_history):
         messages_for_answer = list(conversation_history)
 
     final_user_prompt = user_input
-    if tool_context:
+    if tool_contexts:
         final_user_prompt = (
             f"{user_input}\n\n"
-            f"[SYSTEM BACKGROUND DATA]\n{tool_context}\n"
+            f"[SYSTEM BACKGROUND DATA]\n{combined_context}\n"
             f"Use this retrieved data to directly answer the user's request concisely."
         )
 
