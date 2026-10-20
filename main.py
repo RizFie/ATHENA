@@ -88,7 +88,8 @@ def init_db():
             source_url TEXT,
             link TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(entity_type, title, provider)
+            UNIQUE(entity_type, title, provider),
+            UNIQUE(link)
         )
     """)
     conn.commit()
@@ -122,7 +123,7 @@ def save_research_to_db(entity_name, research_records):
                 item.get("link")
                 or item.get("buy_link")
                 or item.get("apply_link")
-                or "Couldn't retrieve specific link."
+                or None
             )
 
             # --- SMART URL CLEANING & RESOLUTION ---
@@ -177,12 +178,24 @@ def query_database(entity_type=None, limit=15):
     conn.close()
 
     results = []
+    seen = set()
     for row in rows:
-        results.append({
-            "entity_type": row[0],
-            "details": json.loads(row[1])
-        })
-    return results
+        entity = row[0]
+        details = json.loads(row[1])
+
+        title = details.get("item_name_or_title", "").lower()[:15]
+        provider = details.get("provider_or_company", "").lower()[:5]
+
+        # fuzzy signature: Data Science - Zurich
+        signature = get_fuzzy_signature(title, provider)
+
+        if signature not in seen:
+            seen.add(signature)
+            results.append({
+                "entity_type": entity,
+                "details": details
+            })
+    return results[:limit]
 
 def export_db_to_csv(entity_type=None):
     conn = sqlite3.connect(DB_FILE)
@@ -200,15 +213,21 @@ def export_db_to_csv(entity_type=None):
     conn.close()
     
     db_records = []
+    seen = set()
     for row in rows:
-        db_records.append({
-            "entity_type": row[1],
-            "title": row[2],
-            "provider": row[3],
-            "details": json.loads(row[4]),
-            "source_url": row[5],
-            "link": row[6]
-        })
+        title = row[2]
+        provider = row[3]
+        signature = get_fuzzy_signature(title, provider)
+
+        if signature not in seen:
+            db_records.append({
+                "entity_type": row[1],
+                "title": title,
+                "provider": provider,
+                "details": json.loads(row[4]),
+                "source_url": row[5],
+                "link": row[6]
+            })
     #print(db_records)
     try: 
         with open(f"{db_records[0].get("entity_type")}.csv", mode="w", newline="", encoding="utf-8") as file:
@@ -246,6 +265,18 @@ def clear_database(entity_type=None):
         print(f"{RED}Error clearing database table: {e}{RESET}")
 
     return deleted_count
+
+def get_fuzzy_signature(title, provider):
+    """Creates a deduplication signature from the first 2 words of the title and 1st word of provider."""
+    # Remove punctuation and lowercase
+    t_clean = re.sub(r'[^a-z0-9\s]', '', str(title).lower())
+    p_clean = re.sub(r'[^a-z0-9\s]', '', str(provider).lower())
+    
+    # Grab first 2 words of title, 1st word of provider
+    t_words = t_clean.split()[:2]
+    p_words = p_clean.split()[:1]
+    
+    return "-".join(t_words + p_words)
     
 
 
