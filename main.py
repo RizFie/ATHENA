@@ -178,8 +178,8 @@ def query_database(entity_type=None, limit=15):
         entity = row[0]
         details = json.loads(row[1])
 
-        title = details.get("item_name_or_title", "").lower()[:15]
-        provider = details.get("provider_or_company", "").lower()[:5]
+        title = details.get("item_name_or_title").lower()[:15] or ""
+        provider = details.get("provider_or_company").lower()[:5] or ""
 
         # fuzzy signature: Data Science - Zurich
         signature = get_fuzzy_signature(title, provider)
