@@ -1,2 +1,3 @@
 ddgs
-curl-cffi markdownify
+curl-cffi 
+markdownify

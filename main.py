@@ -17,7 +17,6 @@ if os.name == 'nt':
 
 # Config
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL_INFO_URL = "http://localhost:11434/api/ps"
 MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 MEMORY_FILE = "memory.json"
 DB_FILE = "athena_research.db"
@@ -67,19 +66,6 @@ def vertical_gradient(text, start_color, end_color):
 
         color = f"\033[38;2;{r};{g};{b}m"
         print(f"{color}{line}{RESET}")
-
-
-# ----- RUNNING MODEL INFO -----
-def get_model_info():
-    info = urllib.request.Request(MODEL_INFO_URL)
-    try:
-        with urllib.request.urlopen(info, timeout=10) as response:
-            model_info = json.loads(response.read().decode("utf-8"))
-            print(f"{GREEN}Model Info:{RESET} {model_info}")
-            return model_info
-    except Exception as e:
-        print(f"{RED}Error fetching model info: {e}{RESET}")
-        return None
 
 
 # ----- DATABASE FUNCTIONS -----
@@ -229,6 +215,7 @@ def export_db_to_csv(entity_type=None):
         signature = get_fuzzy_signature(title, provider)
 
         if signature not in seen:
+            seen.add(signature)
             db_records.append({
                 "entity_type": row[1],
                 "title": title,
@@ -239,7 +226,7 @@ def export_db_to_csv(entity_type=None):
             })
     #print(db_records)
     try: 
-        with open(f"{db_records[0].get("entity_type")}.csv", mode="w", newline="", encoding="utf-8") as file:
+        with open(f"{db_records[0].get('entity_type')}.csv", mode="w", newline="", encoding="utf-8") as file:
             field_names = ["entity_type", "title", "provider", "details", "source_url", "link"]
             dict_writer = csv.DictWriter(file, fieldnames=field_names)
             dict_writer.writeheader()
@@ -251,16 +238,15 @@ def export_db_to_csv(entity_type=None):
     return len(db_records)
 
 def clear_database(entity_type=None):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
     query = "DELETE FROM research_items WHERE 1=1"
     params = []
-    cleared = False
 
     if entity_type:
         query += " AND entity_type LIKE ?"
         params.append(f"%{entity_type.lower()}%")
-    try: 
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor() 
         cursor.execute(query, params)
         deleted_count = cursor.rowcount
         conn.commit()
@@ -272,6 +258,10 @@ def clear_database(entity_type=None):
             print(f"{GREEN}Successfully cleared the database table.{RESET}")
     except Exception as e:
         print(f"{RED}Error clearing database table: {e}{RESET}")
+        return -1
+    finally:
+        if conn:
+            conn.close()
 
     return deleted_count
 
@@ -951,8 +941,6 @@ if __name__ == "__main__":
     print(f"{YELLOW}Loading Athena memory...{RESET}")
     conversations = load_memory()
     print(f"{GREEN}Autonomous Agent initialized successfully.\n{RESET}")
-
-    get_model_info()
 
     # Purple -> Cyan
     vertical_gradient(
