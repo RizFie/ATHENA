@@ -181,6 +181,6 @@ Respect each website's terms of service and `robots.txt`, keep request volume lo
 
 Built by **Hariz Rafie**, an Intelligent Systems Engineering student in Malaysia with a background in embedded systems (Arduino, ESP32), AI/ML and robotics, working toward a career in robotics and AI engineering. Athena is an exploration of what a small local model can do when the system around it is designed carefully.
 
-- GitHub: [@your-username](https://github.com/rizfie)
-- LinkedIn: [your-name](https://www.linkedin.com/in/hariz-rafie)
+- GitHub: [@RizFie](https://github.com/rizfie)
+- LinkedIn: [Hariz Rafie](https://www.linkedin.com/in/hariz-rafie)
 - Email: harizrafie86@gmail.com
